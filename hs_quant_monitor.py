@@ -1,9 +1,9 @@
 import streamlit as st
-import akshare as ak
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 import time
+import requests
 
 # ==========================================
 # 0. Page Config & Constants
@@ -47,34 +47,58 @@ st.markdown("""
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_hk_index():
-    """获取 800806.HK 实时点位 (主求 akshare，兜底预留为 None)"""
+    """获取 800806.HK 实时点位 (使用新浪 Sina API)"""
     try:
-        df = ak.stock_hk_index_spot_em()
-        hk_index = df[df['代码'] == '800806']
-        if not hk_index.empty:
-            return float(hk_index.iloc[0]['最新价'])
-        return None
+        url = "https://hq.sinajs.cn/list=rt_hk800806"
+        headers = {"Referer": "https://finance.sina.com.cn"}
+        res = requests.get(url, headers=headers, timeout=5)
+        # 返回格式: var hq_str_rt_hk800806="恒生互联网科技业,2518.00,...";
+        data_str = res.text.split('"')[1]
+        if data_str:
+            fields = data_str.split(',')
+            return float(fields[6]) # 新浪HK实时接口的第6个字段通常为最新价
     except Exception as e:
-        return None  # 部署在云端时，EastMoney 接口大批量屏蔽云端IP，统一返回None交由UI层处理
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_etf_spot():
-    """获取 513330.SH 实时盘口现价"""
+        pass
+        
+    # 尝试腾讯备用接口
     try:
-        df = ak.fund_etf_spot_em()
-        etf = df[df['代码'] == FUND_CODE]
-        if not etf.empty:
-            return float(etf.iloc[0]['最新价'])
+        url = "https://qt.gtimg.cn/q=hk800806"
+        res = requests.get(url, timeout=5)
+        # 返回格式: v_hk800806="1~恒生互联网科技业~800806~2518.00~...
+        data_str = res.text.split('"')[1]
+        if data_str:
+            fields = data_str.split('~')
+            return float(fields[3]) # 腾讯接口第3个字段为最新价
     except:
         pass
         
-    # 尝试使用 Sina 接口作为备用 (不一定有这个ETF但尽力兜底)
+    return None
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_etf_spot():
+    """获取 513330.SH 实时盘口现价 (使用腾讯 Tencent API 或新浪 API)"""
+    # 优先腾讯接口
     try:
-        df_sina = ak.fund_etf_category_sina(symbol="ETF基金")
-        # Sina接口代码通常带市场前缀 sh513330
-        etf_sina = df_sina[df_sina['代码'] == f"sh{FUND_CODE}"]
-        if not etf_sina.empty:
-            return float(etf_sina.iloc[0]['最新价'])
+        url = "https://qt.gtimg.cn/q=sh513330"
+        res = requests.get(url, timeout=5)
+        # v_sh513330="1~华夏恒生互联网ETF~513330~0.446~...
+        data_str = res.text.split('"')[1]
+        if data_str:
+            fields = data_str.split('~')
+            return float(fields[3])
+    except:
+        pass
+        
+    # 尝试新浪备用接口
+    try:
+        url = "https://hq.sinajs.cn/list=sh513330"
+        headers = {"Referer": "https://finance.sina.com.cn"}
+        res = requests.get(url, headers=headers, timeout=5)
+        # var hq_str_sh513330="华夏...',0.446,...
+        data_str = res.text.split('"')[1]
+        if data_str:
+            fields = data_str.split(',')
+            return float(fields[3]) # 新浪A股接口第3字段为现价
     except:
         pass
         
@@ -82,11 +106,24 @@ def fetch_etf_spot():
 
 @st.cache_data(ttl=60*60, show_spinner=False)
 def fetch_etf_hist():
-    """获取 513330.SH 近期日线数据用于绘图"""
+    """获取 513330.SH 近期日线数据用于绘图 (使用腾讯日线API)"""
     try:
-        df = ak.fund_etf_hist_em(symbol=FUND_CODE, period="daily", start_date="20230101", adjust="qfq")
-        df = df.tail(100)
+        # 腾讯日线接口
+        url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param=sh513330,day,,,100,qfq"
+        res = requests.get(url, timeout=5)
+        data = res.json()
+        
+        # 提取日线数据 (qfqday 表示前复权)
+        kline_list = data['data']['sh513330']['qfqday']
+        
+        # 腾讯接口格式: [date, open, close, high, low, volume]
+        df = pd.DataFrame(kline_list, columns=['日期', '开盘', '收盘', '最高', '最低', '成交量'])
         df['日期'] = pd.to_datetime(df['日期'])
+        df['开盘'] = df['开盘'].astype(float)
+        df['收盘'] = df['收盘'].astype(float)
+        df['最高'] = df['最高'].astype(float)
+        df['最低'] = df['最低'].astype(float)
+        
         return df
     except Exception:
         return None
