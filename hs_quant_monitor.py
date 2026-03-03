@@ -47,17 +47,15 @@ st.markdown("""
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_hk_index():
-    """获取 800806.HK 实时点位"""
+    """获取 800806.HK 实时点位 (主求 akshare，兜底预留为 None)"""
     try:
         df = ak.stock_hk_index_spot_em()
-        # 港股通代码可能会带有不同的后缀，精确匹配代码
         hk_index = df[df['代码'] == '800806']
         if not hk_index.empty:
             return float(hk_index.iloc[0]['最新价'])
         return None
     except Exception as e:
-        st.sidebar.error(f"⚠️ 恒生互联网指数请求失败: {e}")
-        return None
+        return None  # 部署在云端时，EastMoney 接口大批量屏蔽云端IP，统一返回None交由UI层处理
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_etf_spot():
@@ -67,22 +65,30 @@ def fetch_etf_spot():
         etf = df[df['代码'] == FUND_CODE]
         if not etf.empty:
             return float(etf.iloc[0]['最新价'])
-        return None
-    except Exception as e:
-        st.sidebar.error(f"⚠️ ETF 实时数据请求失败: {e}")
-        return None
+    except:
+        pass
+        
+    # 尝试使用 Sina 接口作为备用 (不一定有这个ETF但尽力兜底)
+    try:
+        df_sina = ak.fund_etf_category_sina(symbol="ETF基金")
+        # Sina接口代码通常带市场前缀 sh513330
+        etf_sina = df_sina[df_sina['代码'] == f"sh{FUND_CODE}"]
+        if not etf_sina.empty:
+            return float(etf_sina.iloc[0]['最新价'])
+    except:
+        pass
+        
+    return None
 
-@st.cache_data(ttl=60*60, show_spinner=False)  # K线数据缓存久一点
+@st.cache_data(ttl=60*60, show_spinner=False)
 def fetch_etf_hist():
     """获取 513330.SH 近期日线数据用于绘图"""
     try:
         df = ak.fund_etf_hist_em(symbol=FUND_CODE, period="daily", start_date="20230101", adjust="qfq")
-        # 保留最近100个交易日
         df = df.tail(100)
         df['日期'] = pd.to_datetime(df['日期'])
         return df
-    except Exception as e:
-        st.sidebar.error(f"⚠️ ETF K线数据请求失败: {e}")
+    except Exception:
         return None
 
 
@@ -143,15 +149,22 @@ def render_ui():
         idx_val = fetch_hk_index()
         etf_val = fetch_etf_spot()
         kline_df = fetch_etf_hist()
+        
+    # 网络失败导致的数据兜底保护层（Manual Override机制）
+    is_manual_override = False
+    if idx_val is None or etf_val is None:
+        st.sidebar.markdown("---")
+        st.sidebar.error("🔌 **网络或反爬虫拦截**\n部署云端的IP通常会被东方财富(EastMoney)等数据源安全拦截以致无法获取实时数据。")
+        st.sidebar.warning("已进入 **应急手动接入模式**")
+        idx_val = st.sidebar.number_input("手动输入恒指互联 (800806.HK) 当下点位:", min_value=1000.0, max_value=5000.0, value=2500.0, step=10.0)
+        etf_val = st.sidebar.number_input("手动输入 ETF (513330.SH) 当下现价:", min_value=0.1, max_value=2.0, value=0.45, step=0.001, format="%.3f")
+        is_manual_override = True
+        
+        st.warning(f"📡 自动获取实盘数据失败（遭遇强力反爬拦截）。系统已自动切换至**应急手动接入模式**，当前使用的是您在侧边栏输入的值。")
     
     # 状态判断逻辑
     state_b_triggered = False
     
-    if idx_val is None or etf_val is None:
-        st.warning("📡 无法获取到实时数据，请检查网络或稍后重试。")
-        # 兜底：如果无法获取，中止后续敏感逻辑
-        return
-        
     diff_points = round(idx_val - INDEX_TRIGGER_POINT, 2)
     
     if idx_val > INDEX_TRIGGER_POINT:
